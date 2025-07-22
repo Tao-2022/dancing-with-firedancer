@@ -10,7 +10,7 @@
 
 ```mermaid
 graph TD
-    subgraph 网络接口 (NIC)
+    subgraph "网络接口 (NIC)"
         A[网络数据包]
     end
 
@@ -18,29 +18,29 @@ graph TD
         B(AF_XDP 零拷贝接收)
         C{解析 L3/L4 头}
         D[发布到 mcache]
-        B --> C --> D;
+        B --> C --> D
     end
 
     subgraph "2. Verify Tile"
         E[从 mcache 消费]
         F{负载均衡}
         G[解析交易]
-        H{签名验证 & 去重};
+        H{签名验证 & 去重}
         I[发布到下游 dcache]
         J[丢弃]
-        E --> F --> G --> H;
-        H -- 成功 --> I;
-        H -- 失败 --> J;
+        E --> F --> G --> H
+        H -->|成功| I
+        H -->|失败| J
     end
 
     subgraph "3. Dedup Tile"
         K[从多个 Verify Tile 消费]
-        L{全局去重 (tcache)}
+        L{全局去重 tcache}
         M[发布到下游 dcache]
         N[丢弃]
-        K --> L;
-        L -- 唯一 --> M;
-        L -- 重复 --> N;
+        K --> L
+        L -->|唯一| M
+        L -->|重复| N
     end
 
     subgraph "4. Pack Tile"
@@ -50,16 +50,16 @@ graph TD
         R{调度决策}
         S[打包成微区块]
         T[发布给 Bank 和 PoH Tiles]
-        O --> P --> R;
-        Q --> R;
-        R --> S --> T;
+        O --> P --> R
+        Q --> R
+        R --> S --> T
     end
 
     subgraph "5. PoH Tile (中间步骤)"
         U(接收微区块)
-        V{混合PoH哈希/盖时间戳};
-        W[转发给 Shred Tile];
-        U --> V --> W;
+        V{混合PoH哈希/盖时间戳}
+        W[转发给 Shred Tile]
+        U --> V --> W
     end
 
     subgraph "6. Shred Tile"
@@ -69,17 +69,17 @@ graph TD
         AA{签名}
         BB[计算 Turbine 目的地]
         CC[通过 mcache 发送给 Net Tile]
-        X --> Y --> Z --> AA --> BB;
+        X --> Y --> Z --> AA --> BB --> CC
     end
     
-    %% Connections between Tiles
-    A --> B;
-    D --> E;
-    I --> K;
-    M --> O;
-    T --> U;
-    W --> X;
-    CC --> A;
+    %% 连接各个 Tiles
+    A --> B
+    D --> E
+    I --> K
+    M --> O
+    T --> U
+    W --> X
+    CC --> A
 ```
 
 ## 各阶段详解与关键源码
