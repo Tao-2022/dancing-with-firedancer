@@ -1,4 +1,4 @@
-# Firedancer 源码学习系列：第二章 - 交易处理流水线 (`disco` 模块)
+# dancing-with-firedancer: 第二章 - 交易处理流水线 (`disco` 模块)
 
 ## 引言
 
@@ -6,7 +6,7 @@
 
 本章将顺着数据流的方向，逐一剖析构成 `disco` 流水线的五个核心 Tile，揭示 Firedancer 高性能交易处理的秘密。
 
-## 整体流程图
+## 整体流程图 (修正版)
 
 ```mermaid
 graph TD
@@ -14,47 +14,72 @@ graph TD
         A[网络数据包]
     end
 
-    subgraph "1. Net Tile (fd_xdp_tile.c)"
-        B(AF_XDP 零拷贝接收) --> C{解析 L3/L4 头};
-        C -->|根据端口分发| D[发布到 mcache];
+    subgraph "1. Net Tile"
+        B(AF_XDP 零拷贝接收)
+        C{解析 L3/L4 头}
+        D[发布到 mcache]
+        B --> C --> D;
     end
 
-    subgraph "2. Verify Tile (fd_verify_tile.c)"
-        E[从 mcache 消费] --> F{负载均衡};
-        F --> G[解析交易];
-        G --> H{签名验证 & 去重};
-        H -- 成功 --> I[发布到下游 dcache];
-        H -- 失败 --> J[丢弃];
+    subgraph "2. Verify Tile"
+        E[从 mcache 消费]
+        F{负载均衡}
+        G[解析交易]
+        H{签名验证 & 去重};
+        I[发布到下游 dcache]
+        J[丢弃]
+        E --> F --> G --> H;
+        H -- 成功 --> I;
+        H -- 失败 --> J;
     end
 
-    subgraph "3. Dedup Tile (fd_dedup_tile.c)"
-        K[从多个 Verify Tile 消费] --> L{全局去重 (tcache)};
-        L -- 唯一 --> M[发布到下游 dcache];
-        L -- 重复 --> N[丢弃];
+    subgraph "3. Dedup Tile"
+        K[从多个 Verify Tile 消费]
+        L{全局去重 (tcache)}
+        M[发布到下游 dcache]
+        N[丢弃]
+        K --> L;
+        L -- 唯一 --> M;
+        L -- 重复 --> N;
     end
 
-    subgraph "4. Pack Tile (fd_pack_tile.c)"
-        O[从 Dedup Tile 消费] --> P(存入内部交易池);
-        Q[PoH Tile 信号: 成为领导者] --> R{调度决策};
-        P --> R;
-        R --> S[打包成微区块];
-        S --> T[发布给 Bank 和 Shred Tiles];
+    subgraph "4. Pack Tile"
+        O[从 Dedup Tile 消费]
+        P(存入内部交易池)
+        Q[PoH Tile 信号: 成为领导者]
+        R{调度决策}
+        S[打包成微区块]
+        T[发布给 Bank 和 PoH Tiles]
+        O --> P --> R;
+        Q --> R;
+        R --> S --> T;
     end
 
-    subgraph "5. Shred Tile (fd_shred_tile.c)"
-        U[从 Pack Tile 消费微区块] --> V{累积成批次};
-        V --> W[切片 & 纠删码编码];
-        W --> X{签名};
-        X --> Y[计算 Turbine 目的地];
-        Y --> Z[通过 mcache 发送给 Net Tile];
+    subgraph "5. PoH Tile (中间步骤)"
+        U(接收微区块)
+        V{混合PoH哈希/盖时间戳};
+        W[转发给 Shred Tile];
+        U --> V --> W;
+    end
+
+    subgraph "6. Shred Tile"
+        X[从 PoH Tile 消费]
+        Y{累积成批次}
+        Z[切片 & 纠删码编码]
+        AA{签名}
+        BB[计算 Turbine 目的地]
+        CC[通过 mcache 发送给 Net Tile]
+        X --> Y --> Z --> AA --> BB;
     end
     
+    %% Connections between Tiles
     A --> B;
     D --> E;
     I --> K;
     M --> O;
     T --> U;
-    Z --> A;
+    W --> X;
+    CC --> A;
 ```
 
 ## 各阶段详解与关键源码
@@ -167,7 +192,7 @@ after_frag( fd_dedup_ctx_t *    ctx,
 
 ### 4. Pack Tile: 智能区块打包
 
-**职责**: 这是交易处理的决策中心。它从 `dedup` tile 接收干净的交易，并根据领导者状态、银行（bank）忙闲、交易费用、CU 限制等多种因素，智能地将交易打包成微区块，发送给银行执行。
+**职责**: 这是交易处理的决策中心。它从 `dedup` tile 接收干净的交易，并根据领导者状态、银行（bank）忙闲、交易费用、CU 限制等多种因素，智能地将交易打包成微区块，**发送给 `bank` tile 执行和 `poh` tile 进行历史回溯**。
 
 **关键源码 (`src/disco/pack/fd_pack_tile.c`)**:
 `after_credit` 函数是其“大脑”，负责调度决策。
@@ -197,7 +222,8 @@ after_credit( fd_pack_ctx_t *     ctx,
     ulong schedule_cnt = fd_pack_schedule_next_microblock( ctx->pack, CUS_PER_MICROBLOCK, VOTE_FRACTION, (ulong)i, flags, microblock_dst );
 
     if( FD_LIKELY( schedule_cnt ) ) {
-      // 4. 调度成功，将打包好的微区块发布给下游 bank tile
+      // 4. 调度成功，将打包好的微区块发布给下游 bank 和 poh tiles
+      ulong sig = fd_disco_poh_sig( ctx->leader_slot, POH_PKT_TYPE_MICROBLOCK, (ulong)i );
       fd_stem_publish( stem, 0UL, sig, chunk, msg_sz, ... );
       // ...
     }
@@ -208,18 +234,19 @@ after_credit( fd_pack_ctx_t *     ctx,
 
 ### 5. Shred Tile: 切片、编码与广播预备
 
-**职责**: 将 `pack` tile 生成的逻辑微区块，转换成 Solana 网络中物理传输的 Shreds。它负责切片、生成纠删码、签名，并计算出每个 Shred 在 Turbine 网络中的传播路径，最后交给 `net` tile 发送。
+**职责**: **从 `poh` tile 接收带有历史证明的微区块**，然后将其转换成 Solana 网络中物理传输的 Shreds。它负责切片、生成纠删码、签名，并计算出每个 Shred 在 Turbine 网络中的传播路径，最后交给 `net` tile 发送。
 
 **关键源码 (`src/disco/shred/fd_shred_tile.c`)**:
-`during_frag` 负责累积批次并触发切片，`after_frag` 负责发送。
+`during_frag` 负责从 `poh` tile 累积批次并触发切片。
 
 ```c
 // 在接收到一个新的数据分片时由 fd_stem 框架调用。
 static void
 during_frag( fd_shred_ctx_t * ctx, ... ) {
+  // 检查输入是否来自 PoH tile
   if( FD_UNLIKELY( ctx->in_kind[ in_idx ]==IN_KIND_POH ) ) {
     // --- 作为领导者的逻辑 ---
-    // 1. 累积微区块到 pending_batch
+    // 1. 累积从 PoH tile 来的微区块到 pending_batch
     // ...
     // 2. 检查是否达到触发切片的条件
     if( FD_LIKELY( process_current_batch )) {
@@ -230,33 +257,12 @@ during_frag( fd_shred_ctx_t * ctx, ... ) {
         while( pend_sz > 0UL ) {
           // 调用 shredder 核心函数，生成一个 FEC set
           FD_TEST( fd_shredder_next_fec_set( ctx->shredder, out, ... ) );
-          // 记录下已生成的 FEC set 索引，准备发送
+          // 记录下已生成的 FEC set 索引，准备在 after_frag 中发送
           ctx->send_fec_set_idx[ ctx->send_fec_set_cnt++ ] = ...;
         }
         fd_shredder_fini_batch( ctx->shredder );
       }
       // ...
-    }
-  }
-}
-
-// 在数据拷贝完成后由 fd_stem 框架调用。
-static void
-after_frag( fd_shred_ctx_t * ctx, ... ) {
-  // ...
-  // --- 公共发送逻辑 ---
-  // 遍历所有准备好的 FEC sets
-  for( ulong fset_k=0; fset_k<ctx->send_fec_set_cnt; fset_k++ ) {
-    // ...
-    // a. 计算每个 shred 的网络目的地 (根据 Turbine 协议)
-    fd_shred_dest_t * sdest = fd_stake_ci_get_sdest_for_slot( ... );
-    fd_shred_dest_idx_t * dests = fd_shred_dest_compute_children( ... );
-
-    // b. 遍历所有需要发送的 shred 和它们的目的地，调用 send_shred
-    for( ulong i=0UL; i<k; i++ ) {
-      for( ulong j=0UL; j<*max_dest_cnt; j++ ) {
-        send_shred( ctx, new_shreds[ i ], ... );
-      }
     }
   }
 }

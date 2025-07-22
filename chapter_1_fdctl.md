@@ -1,4 +1,4 @@
-# Firedancer 源码学习系列：第一章 - 应用引导与进程模型 (`fdctl`)
+# dancing-with-firedancer: 第一章 - 应用引导与进程模型 (`fdctl`)
 
 ## 引言
 
