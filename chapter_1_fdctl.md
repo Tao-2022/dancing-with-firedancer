@@ -119,12 +119,15 @@ configure_stage( configure_stage_t * stage,
 `run` 命令创建了一个如下的进程树，其核心是 **PID Namespace**:
 
 ```
-+ main (fdctl run)
-+-- pidns (PID=1, a new PID namespace's init process)
-    +-- agave (Frankendancer's compatibility layer)
-    +-- tile 0 (e.g., net)
-    +-- tile 1 (e.g., verify)
-    ...
+main (fdctl run)
+└── pidns (PID=1, 新 PID namespace 的 init 进程)
+    ├── agave (Frankendancer 兼容层)
+    ├── tile_net (网络处理 tile)
+    ├── tile_verify (交易验签 tile)
+    ├── tile_dedup (去重 tile)
+    ├── tile_pack (交易打包 tile)
+    ├── tile_shred (切片 tile)
+    └── ... (其他 tiles)
 ```
 
 这种设计的巧妙之处在于：
